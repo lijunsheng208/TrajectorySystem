@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ..errors import UploadError
 from ..schemas import UploadResult
+from ..validation import TrajectoryRowValidationError, validate_trajectory_row
 
 
 EXPECTED_FILENAME = "query_traj_od.csv"
@@ -125,6 +126,15 @@ class UploadService:
                             "INVALID_ROW",
                             f"CSV row {row_number} has {len(row)} columns; expected {len(headers)}",
                         )
+                    row_values = dict(zip(headers, row))
+                    try:
+                        validate_trajectory_row(row_values)
+                    except TrajectoryRowValidationError as exc:
+                        raise UploadError(
+                            422,
+                            "INVALID_TRAJECTORY_DATA",
+                            f"CSV row {row_number}, field {exc.field}: {exc.message}",
+                        ) from exc
                     if count == 999_999:
                         raise UploadError(
                             422,

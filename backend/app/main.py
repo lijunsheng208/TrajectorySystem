@@ -1,14 +1,22 @@
 import logging
 from uuid import uuid4
+from typing import Optional
 
-from fastapi import FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from .config import Settings
 from .errors import UploadError
-from .schemas import ErrorResponse, UploadResult
+from .schemas import (
+    ErrorResponse,
+    TrajectoryDetail,
+    TrajectoryPage,
+    UploadResult,
+)
+from .services.trajectory_query_service import TrajectoryQueryService
 from .services.upload_service import UploadService
+from starlette.concurrency import run_in_threadpool
 
 
 logging.basicConfig(
@@ -23,6 +31,7 @@ def create_app(settings: Settings = None) -> FastAPI:
     upload_service = UploadService(
         app_settings.upload_root, app_settings.max_upload_bytes
     )
+    trajectory_query_service = TrajectoryQueryService(app_settings.upload_root)
     app = FastAPI(title="Trajectory Similarity API", version="1.0.0")
 
     @app.middleware("http")
@@ -59,7 +68,7 @@ def create_app(settings: Settings = None) -> FastAPI:
             content={
                 "error": {
                     "code": "INVALID_REQUEST",
-                    "message": "multipart field 'file' is required",
+                    "message": "request parameters are invalid",
                     "request_id": request.state.request_id,
                 }
             },
@@ -94,6 +103,35 @@ def create_app(settings: Settings = None) -> FastAPI:
     )
     async def upload_trajectory_file(file: UploadFile = File(...)) -> UploadResult:
         return await upload_service.upload(file)
+
+    @app.get(
+        "/api/uploads/{upload_id}/trajectories",
+        response_model=TrajectoryPage,
+        responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+    )
+    async def list_trajectories(
+        upload_id: str,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        search: Optional[str] = Query(None, min_length=1, max_length=128),
+    ) -> TrajectoryPage:
+        return await run_in_threadpool(
+            trajectory_query_service.list_trajectories,
+            upload_id,
+            page,
+            page_size,
+            search,
+        )
+
+    @app.get(
+        "/api/uploads/{upload_id}/trajectories/{trajectory_id}",
+        response_model=TrajectoryDetail,
+        responses={404: {"model": ErrorResponse}},
+    )
+    async def get_trajectory(upload_id: str, trajectory_id: str) -> TrajectoryDetail:
+        return await run_in_threadpool(
+            trajectory_query_service.get_trajectory, upload_id, trajectory_id
+        )
 
     @app.get("/health", include_in_schema=False)
     async def health() -> dict:

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel
 
@@ -15,6 +15,30 @@ class UploadResult(BaseModel):
     created_at: datetime
 
 
+class TrajectorySummary(BaseModel):
+    trajectory_id: str
+    user_id: str
+    call_type: str
+    road_len: int
+    gps_len: int
+
+
+class TrajectoryPage(BaseModel):
+    upload_id: str
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+    items: List[TrajectorySummary]
+
+
+class TrajectoryDetail(TrajectorySummary):
+    road: List[Any]
+    gps: List[List[float]]
+    time: List[float]
+    ptime: List[float]
+
+
 class ErrorDetail(BaseModel):
     code: str
     message: str
@@ -23,4 +47,3 @@ class ErrorDetail(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorDetail
-
