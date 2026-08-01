@@ -39,8 +39,8 @@ def validate_trajectory_row(row: Mapping[str, str]) -> ValidatedTrajectoryRow:
     projected_timestamps = _parse_list(row, "ptime")
 
     _validate_gps(gps)
-    _validate_timestamps(timestamps, "time", allow_equal=False)
-    _validate_timestamps(projected_timestamps, "ptime", allow_equal=True)
+    _validate_timestamps(timestamps, "time")
+    _validate_timestamps(projected_timestamps, "ptime")
 
     if len(gps) != len(timestamps):
         raise TrajectoryRowValidationError(
@@ -131,18 +131,13 @@ def _validate_gps(gps: List[Any]) -> None:
             )
 
 
-def _validate_timestamps(values: List[Any], field: str, allow_equal: bool) -> None:
+def _validate_timestamps(values: List[Any], field: str) -> None:
     previous = None
     for index, raw_value in enumerate(values, start=1):
         timestamp = _finite_number(raw_value, field, f"item {index}")
-        is_out_of_order = (
-            previous is not None
-            and (timestamp < previous if allow_equal else timestamp <= previous)
-        )
-        if is_out_of_order:
-            requirement = "non-decreasing" if allow_equal else "strictly increasing"
+        if previous is not None and timestamp < previous:
             raise TrajectoryRowValidationError(
-                field, f"timestamps must be {requirement} at item {index}"
+                field, f"timestamps must be non-decreasing at item {index}"
             )
         previous = timestamp
 

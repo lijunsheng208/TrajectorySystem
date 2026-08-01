@@ -10,12 +10,12 @@ from .config import Settings
 from .errors import UploadError
 from .schemas import (
     ErrorResponse,
+    EvaluationResult,
+    EvaluationTrajectoryPage,
     TrajectoryDetail,
-    TrajectoryPage,
-    UploadResult,
 )
-from .services.trajectory_query_service import TrajectoryQueryService
-from .services.upload_service import UploadService
+from .services.evaluation_service import EvaluationService
+from .services.trajectory_query_service import EvaluationTrajectoryQueryService
 from starlette.concurrency import run_in_threadpool
 
 
@@ -28,10 +28,10 @@ logger = logging.getLogger(__name__)
 
 def create_app(settings: Settings = None) -> FastAPI:
     app_settings = settings or Settings.from_environment()
-    upload_service = UploadService(
+    evaluation_service = EvaluationService(
         app_settings.upload_root, app_settings.max_upload_bytes
     )
-    trajectory_query_service = TrajectoryQueryService(app_settings.upload_root)
+    evaluation_query_service = EvaluationTrajectoryQueryService(evaluation_service)
     app = FastAPI(title="Trajectory Similarity API", version="1.0.0")
 
     @app.middleware("http")
@@ -91,46 +91,137 @@ def create_app(settings: Settings = None) -> FastAPI:
         )
 
     @app.post(
-        "/api/uploads",
-        response_model=UploadResult,
+        "/api/evaluations",
+        response_model=EvaluationResult,
         status_code=201,
-        responses={
-            400: {"model": ErrorResponse},
-            413: {"model": ErrorResponse},
-            422: {"model": ErrorResponse},
-            500: {"model": ErrorResponse},
-        },
     )
-    async def upload_trajectory_file(file: UploadFile = File(...)) -> UploadResult:
-        return await upload_service.upload(file)
+    async def create_evaluation() -> EvaluationResult:
+        return await run_in_threadpool(evaluation_service.create)
 
     @app.get(
-        "/api/uploads/{upload_id}/trajectories",
-        response_model=TrajectoryPage,
-        responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+        "/api/evaluations/{evaluation_id}",
+        response_model=EvaluationResult,
+        responses={404: {"model": ErrorResponse}},
     )
-    async def list_trajectories(
-        upload_id: str,
-        page: int = Query(1, ge=1),
-        page_size: int = Query(20, ge=1, le=100),
-        search: Optional[str] = Query(None, min_length=1, max_length=128),
-    ) -> TrajectoryPage:
+    async def get_evaluation(evaluation_id: str) -> EvaluationResult:
+        return await run_in_threadpool(evaluation_service.get, evaluation_id)
+
+    @app.put(
+        "/api/evaluations/{evaluation_id}/files/query",
+        response_model=EvaluationResult,
+        responses={
+            400: {"model": ErrorResponse},
+            404: {"model": ErrorResponse},
+            413: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+        },
+    )
+    async def upload_query_file(
+        evaluation_id: str, file: UploadFile = File(...)
+    ) -> EvaluationResult:
+        return await evaluation_service.upload_file(evaluation_id, "query", file)
+
+    @app.put(
+        "/api/evaluations/{evaluation_id}/files/query-sim",
+        response_model=EvaluationResult,
+        responses={
+            404: {"model": ErrorResponse},
+            413: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+        },
+    )
+    async def upload_query_sim_file(
+        evaluation_id: str, file: UploadFile = File(...)
+    ) -> EvaluationResult:
+        return await evaluation_service.upload_file(evaluation_id, "query-sim", file)
+
+    @app.put(
+        "/api/evaluations/{evaluation_id}/files/database",
+        response_model=EvaluationResult,
+        responses={
+            404: {"model": ErrorResponse},
+            413: {"model": ErrorResponse},
+            422: {"model": ErrorResponse},
+        },
+    )
+    async def upload_database_file(
+        evaluation_id: str, file: UploadFile = File(...)
+    ) -> EvaluationResult:
+        return await evaluation_service.upload_file(evaluation_id, "database", file)
+
+    async def list_role_trajectories(
+        evaluation_id: str,
+        role: str,
+        page: int,
+        page_size: int,
+        search: Optional[str],
+    ) -> EvaluationTrajectoryPage:
         return await run_in_threadpool(
-            trajectory_query_service.list_trajectories,
-            upload_id,
+            evaluation_query_service.list_trajectories,
+            evaluation_id,
+            role,
             page,
             page_size,
             search,
         )
 
     @app.get(
-        "/api/uploads/{upload_id}/trajectories/{trajectory_id}",
+        "/api/evaluations/{evaluation_id}/trajectories/query",
+        response_model=EvaluationTrajectoryPage,
+        responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+    )
+    async def list_query_trajectories(
+        evaluation_id: str,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        search: Optional[str] = Query(None, min_length=1, max_length=128),
+    ) -> EvaluationTrajectoryPage:
+        return await list_role_trajectories(
+            evaluation_id, "query", page, page_size, search
+        )
+
+    @app.get(
+        "/api/evaluations/{evaluation_id}/trajectories/query-sim",
+        response_model=EvaluationTrajectoryPage,
+        responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+    )
+    async def list_query_sim_trajectories(
+        evaluation_id: str,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        search: Optional[str] = Query(None, min_length=1, max_length=128),
+    ) -> EvaluationTrajectoryPage:
+        return await list_role_trajectories(
+            evaluation_id, "query-sim", page, page_size, search
+        )
+
+    @app.get(
+        "/api/evaluations/{evaluation_id}/trajectories/database",
+        response_model=EvaluationTrajectoryPage,
+        responses={404: {"model": ErrorResponse}, 422: {"model": ErrorResponse}},
+    )
+    async def list_database_trajectories(
+        evaluation_id: str,
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=100),
+        search: Optional[str] = Query(None, min_length=1, max_length=128),
+    ) -> EvaluationTrajectoryPage:
+        return await list_role_trajectories(
+            evaluation_id, "database", page, page_size, search
+        )
+
+    @app.get(
+        "/api/evaluations/{evaluation_id}/trajectories/{trajectory_id}",
         response_model=TrajectoryDetail,
         responses={404: {"model": ErrorResponse}},
     )
-    async def get_trajectory(upload_id: str, trajectory_id: str) -> TrajectoryDetail:
+    async def get_evaluation_trajectory(
+        evaluation_id: str, trajectory_id: str
+    ) -> TrajectoryDetail:
         return await run_in_threadpool(
-            trajectory_query_service.get_trajectory, upload_id, trajectory_id
+            evaluation_query_service.get_trajectory,
+            evaluation_id,
+            trajectory_id,
         )
 
     @app.get("/health", include_in_schema=False)

@@ -28,6 +28,5 @@ class Settings:
             upload_root=Path(
                 os.getenv("UPLOAD_ROOT", str(project_root / "data" / "uploads"))
             ).resolve(),
-            max_upload_bytes=_positive_int("MAX_UPLOAD_BYTES", 200 * 1024 * 1024),
+            max_upload_bytes=_positive_int("MAX_UPLOAD_BYTES", 512 * 1024 * 1024),
         )
-

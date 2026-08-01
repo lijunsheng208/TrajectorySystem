@@ -1,35 +1,38 @@
 import csv
-import json
 from pathlib import Path
 import re
 from typing import Dict, Iterator, Optional, Tuple
 
 from ..errors import UploadError
-from ..schemas import TrajectoryDetail, TrajectoryPage, TrajectorySummary
+from ..schemas import EvaluationTrajectoryPage, TrajectoryDetail, TrajectorySummary
 from ..validation import TrajectoryRowValidationError, validate_trajectory_row
+from .evaluation_service import EvaluationService, ROLE_CONFIG
 
 
-UPLOAD_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
-TRAJECTORY_ID_PATTERN = re.compile(r"Q([0-9]{6})")
-
-
-class TrajectoryQueryService:
-    def __init__(self, upload_root: Path) -> None:
-        self.upload_root = upload_root
+class EvaluationTrajectoryQueryService:
+    def __init__(self, evaluation_service: EvaluationService) -> None:
+        self.evaluation_service = evaluation_service
 
     def list_trajectories(
-        self, upload_id: str, page: int, page_size: int, search: Optional[str] = None
-    ) -> TrajectoryPage:
-        upload_dir, stored_total = self._resolve_upload(upload_id)
+        self,
+        evaluation_id: str,
+        role: str,
+        page: int,
+        page_size: int,
+        search: Optional[str] = None,
+    ) -> EvaluationTrajectoryPage:
+        file_name, prefix = self.evaluation_service.role_config(role)
+        role_dir = self.evaluation_service.resolve_role_dir(evaluation_id, role)
+        total = self.evaluation_service.get(evaluation_id).files[role].trajectory_count
         start = (page - 1) * page_size
-        items = []
         normalized_search = search.strip().casefold() if search else ""
         matched_total = 0
+        items = []
 
         for sequence, (_, row) in enumerate(
-            self._trajectory_rows(upload_dir / "query_traj_od.csv"), start=1
+            self._trajectory_rows(role_dir / file_name), start=1
         ):
-            trajectory_id = self._trajectory_id(sequence)
+            trajectory_id = f"{prefix}{sequence:06d}"
             if normalized_search and not self._matches_search(
                 row, trajectory_id, normalized_search
             ):
@@ -50,28 +53,49 @@ class TrajectoryQueryService:
                 )
             )
 
-        total = matched_total if normalized_search else stored_total
-        expected_count = max(0, min(page_size, total - start))
+        result_total = matched_total if normalized_search else total
+        expected_count = max(0, min(page_size, result_total - start))
         if len(items) != expected_count:
             raise RuntimeError("stored trajectory count does not match metadata")
-
-        return TrajectoryPage(
-            upload_id=upload_id,
+        return EvaluationTrajectoryPage(
+            evaluation_id=evaluation_id,
+            role=role,
             page=page,
             page_size=page_size,
-            total=total,
-            total_pages=(total + page_size - 1) // page_size,
+            total=result_total,
+            total_pages=(result_total + page_size - 1) // page_size,
             items=items,
         )
 
-    def get_trajectory(self, upload_id: str, trajectory_id: str) -> TrajectoryDetail:
-        upload_dir, total = self._resolve_upload(upload_id)
-        sequence = self._parse_trajectory_id(trajectory_id)
-        if sequence > total:
+    def get_trajectory(
+        self, evaluation_id: str, trajectory_id: str
+    ) -> TrajectoryDetail:
+        match = re.fullmatch(r"([QSD])([0-9]{6})", trajectory_id)
+        if match is None or int(match.group(2)) == 0:
+            raise UploadError(404, "TRAJECTORY_NOT_FOUND", "trajectory was not found")
+        prefix, sequence_text = match.groups()
+        role = next(
+            (
+                name
+                for name, (_, configured_prefix) in ROLE_CONFIG.items()
+                if configured_prefix == prefix
+            ),
+            None,
+        )
+        if role is None:
+            raise UploadError(404, "TRAJECTORY_NOT_FOUND", "trajectory was not found")
+        current = self.evaluation_service.get(evaluation_id)
+        if (
+            role not in current.files
+            or int(sequence_text) > current.files[role].trajectory_count
+        ):
             raise UploadError(404, "TRAJECTORY_NOT_FOUND", "trajectory was not found")
 
+        file_name, _ = ROLE_CONFIG[role]
+        role_dir = self.evaluation_service.resolve_role_dir(evaluation_id, role)
+        sequence = int(sequence_text)
         for current_sequence, (_, row) in enumerate(
-            self._trajectory_rows(upload_dir / "query_traj_od.csv"), start=1
+            self._trajectory_rows(role_dir / file_name), start=1
         ):
             if current_sequence != sequence:
                 continue
@@ -87,27 +111,7 @@ class TrajectoryQueryService:
                 time=data.time,
                 ptime=data.ptime,
             )
-
         raise RuntimeError("stored trajectory count does not match metadata")
-
-    def _resolve_upload(self, upload_id: str) -> Tuple[Path, int]:
-        if not UPLOAD_ID_PATTERN.fullmatch(upload_id):
-            raise UploadError(404, "UPLOAD_NOT_FOUND", "upload was not found")
-        upload_dir = self.upload_root / upload_id
-        source = upload_dir / "query_traj_od.csv"
-        metadata_path = upload_dir / "metadata.json"
-        if not upload_dir.is_dir() or not source.is_file() or not metadata_path.is_file():
-            raise UploadError(404, "UPLOAD_NOT_FOUND", "upload was not found")
-
-        try:
-            with metadata_path.open("r", encoding="utf-8") as metadata_file:
-                metadata = json.load(metadata_file)
-            total = int(metadata["trajectory_count"])
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("upload metadata is invalid") from exc
-        if total < 1:
-            raise RuntimeError("upload metadata has an invalid trajectory count")
-        return upload_dir, total
 
     @staticmethod
     def _trajectory_rows(source: Path) -> Iterator[Tuple[int, Dict[str, str]]]:
@@ -119,7 +123,8 @@ class TrajectoryQueryService:
                         key.strip(): value for key, value in row.items() if key is not None
                     }
                     if not normalized or all(
-                        value is None or not value.strip() for value in normalized.values()
+                        value is None or not value.strip()
+                        for value in normalized.values()
                     ):
                         continue
                     yield csv_row_number, normalized
@@ -140,18 +145,4 @@ class TrajectoryQueryService:
         row: Dict[str, str], trajectory_id: str, normalized_search: str
     ) -> bool:
         user_id = str(row.get("user_id") or "").strip().casefold()
-        return (
-            trajectory_id.casefold() == normalized_search
-            or user_id == normalized_search
-        )
-
-    @staticmethod
-    def _parse_trajectory_id(trajectory_id: str) -> int:
-        match = TRAJECTORY_ID_PATTERN.fullmatch(trajectory_id)
-        if match is None or int(match.group(1)) == 0:
-            raise UploadError(404, "TRAJECTORY_NOT_FOUND", "trajectory was not found")
-        return int(match.group(1))
-
-    @staticmethod
-    def _trajectory_id(sequence: int) -> str:
-        return f"Q{sequence:06d}"
+        return trajectory_id.casefold() == normalized_search or user_id == normalized_search
